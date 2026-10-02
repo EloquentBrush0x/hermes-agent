@@ -301,17 +301,20 @@ class TaskStore:
         self._lock = threading.Lock()
 
     @staticmethod
-    def _in_scope(rec: dict, agent_slug: str = "", tenant: str = "") -> bool:
-        return not ((agent_slug and rec.get("agent_slug", "") != agent_slug) or (tenant and rec.get("tenant", "") != tenant))
+    def _in_scope(rec: dict, agent_slug: str = "", tenant: str = "", peer: str = "") -> bool:
+        """Empty scope fields match everything; ``peer`` limits a peer to the tasks it created."""
+        return not ((agent_slug and rec.get("agent_slug", "") != agent_slug) or (tenant and rec.get("tenant", "") != tenant)
+                    or (peer and rec.get("peer", "") != peer))
 
-    def _scoped(self, task_id: str, agent_slug: str = "", tenant: str = "") -> Optional[dict]:
+    def _scoped(self, task_id: str, agent_slug: str = "", tenant: str = "", peer: str = "") -> Optional[dict]:
         """Live record if visible in scope. Caller holds the lock."""
         rec = self._tasks.get(task_id)
-        return rec if rec and self._in_scope(rec, agent_slug, tenant) else None
+        return rec if rec and self._in_scope(rec, agent_slug, tenant, peer) else None
 
-    def _push_rec(self, task_id: str, config_id: str = "", agent_slug: str = "", tenant: str = "") -> Optional[dict]:
+    def _push_rec(self, task_id: str, config_id: str = "", agent_slug: str = "", tenant: str = "",
+                  peer: str = "") -> Optional[dict]:
         """Scoped record that has a push config (matching ``config_id`` if given). Caller holds the lock."""
-        rec = self._scoped(task_id, agent_slug, tenant)
+        rec = self._scoped(task_id, agent_slug, tenant, peer)
         if rec and rec.get("push_url") and (not config_id or rec.get("push_config_id") == config_id):
             return rec
         return None
@@ -333,25 +336,28 @@ class TaskStore:
             if (rec := self._tasks.get(task_id)) and rec["state"] not in TERMINAL_STATES:
                 rec["state"] = state
 
-    def set_push_config(self, task_id: str, url: str, agent_slug: str = "", tenant: str = "") -> Optional[dict]:
+    def set_push_config(self, task_id: str, url: str, agent_slug: str = "", tenant: str = "",
+                        peer: str = "") -> Optional[dict]:
         """Attach a push notification config; returns the stored config or None."""
         with self._lock:
-            if not (rec := self._scoped(task_id, agent_slug, tenant)):
+            if not (rec := self._scoped(task_id, agent_slug, tenant, peer)):
                 return None
             rec["push_url"], rec["push_config_id"] = url, "cfg-" + uuid.uuid4().hex[:12]
             return self._push_config_view(rec)
 
-    def get_push_config(self, task_id: str, config_id: str = "", agent_slug: str = "", tenant: str = "") -> Optional[dict]:
+    def get_push_config(self, task_id: str, config_id: str = "", agent_slug: str = "", tenant: str = "",
+                        peer: str = "") -> Optional[dict]:
         with self._lock:
-            return self._push_config_view(rec) if (rec := self._push_rec(task_id, config_id, agent_slug, tenant)) else None
+            return self._push_config_view(rec) if (rec := self._push_rec(task_id, config_id, agent_slug, tenant, peer)) else None
 
-    def list_push_configs(self, task_id: str, agent_slug: str = "", tenant: str = "") -> list[dict]:
-        cfg = self.get_push_config(task_id, "", agent_slug, tenant)
+    def list_push_configs(self, task_id: str, agent_slug: str = "", tenant: str = "", peer: str = "") -> list[dict]:
+        cfg = self.get_push_config(task_id, "", agent_slug, tenant, peer)
         return [cfg] if cfg else []
 
-    def delete_push_config(self, task_id: str, config_id: str = "", agent_slug: str = "", tenant: str = "") -> bool:
+    def delete_push_config(self, task_id: str, config_id: str = "", agent_slug: str = "", tenant: str = "",
+                           peer: str = "") -> bool:
         with self._lock:
-            rec = self._push_rec(task_id, config_id, agent_slug, tenant)
+            rec = self._push_rec(task_id, config_id, agent_slug, tenant, peer)
             if rec:
                 rec["push_url"] = rec["push_config_id"] = ""
             return rec is not None
@@ -363,9 +369,9 @@ class TaskStore:
                 url, rec["push_url"] = rec["push_url"], ""
             return url if rec else ""
 
-    def get(self, task_id: str, agent_slug: str = "", tenant: str = "") -> Optional[dict]:
+    def get(self, task_id: str, agent_slug: str = "", tenant: str = "", peer: str = "") -> Optional[dict]:
         with self._lock:
-            return dict(rec) if (rec := self._scoped(task_id, agent_slug, tenant)) else None
+            return dict(rec) if (rec := self._scoped(task_id, agent_slug, tenant, peer)) else None
 
     def complete(self, task_id: str, state: str, reply: str = "") -> Optional[dict]:
         """Transition a task to a terminal state. Idempotent."""
@@ -382,9 +388,9 @@ class TaskStore:
                 fut.set_result((state, reply))
         return out
 
-    def watch(self, task_id: str, agent_slug: str = "", tenant: str = "") -> Optional[Future]:
+    def watch(self, task_id: str, agent_slug: str = "", tenant: str = "", peer: str = "") -> Optional[Future]:
         with self._lock:
-            if not (rec := self._scoped(task_id, agent_slug, tenant)):
+            if not (rec := self._scoped(task_id, agent_slug, tenant, peer)):
                 return None
             fut: Future = Future()
             if rec["state"] in TERMINAL_STATES:
@@ -394,13 +400,13 @@ class TaskStore:
             return fut
 
     def list(self, context_id: str = "", state: str = "", page_size: int = 50, offset: int = 0,
-             agent_slug: str = "", tenant: str = "", with_total: bool = False):
+             agent_slug: str = "", tenant: str = "", with_total: bool = False, peer: str = ""):
         """Filtered task page (newest first) as ``(records, next_offset)``, or
         ``(records, next_offset, total)`` with ``with_total`` (v1.0 ListTasks totalSize)."""
         page_size = max(1, min(int(page_size or 50), 100))
         with self._lock:
             recs = [dict(r) for r in reversed(self._tasks.values())
-                    if self._in_scope(r, agent_slug, tenant)
+                    if self._in_scope(r, agent_slug, tenant, peer)
                     and (not context_id or r["context_id"] == context_id) and (not state or r["state"] == state)]
         total = len(recs)
         page = recs[offset:offset + page_size]

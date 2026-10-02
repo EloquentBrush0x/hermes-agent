@@ -960,6 +960,47 @@ class TestInboundRoundTrip:
 
         asyncio.run(run())
 
+    def test_trusted_peer_cannot_reach_another_peers_tasks(self, monkeypatch):
+        """Two trusted peers: tasks/get, tasks/list, tasks/cancel and push-config calls only see the
+        caller's own tasks. Another peer's task is "not found" (no id or reply leak), and its push
+        callback cannot be redirected to the other peer's URL."""
+        monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("A2A_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.setenv("A2A_PEER_TOKENS", "alice:tok-a,bob:tok-b")
+        monkeypatch.setenv("A2A_TRUSTED_PEERS", "alice,bob")
+        adapter, base = _make_live_adapter(monkeypatch, reply_fn=lambda event: "alice-private-reply")
+        alice = {"Authorization": "Bearer tok-a"}
+        bob = {"Authorization": "Bearer tok-b"}
+
+        def rpc(headers, method, params):
+            return _post_json(base + "/", {"jsonrpc": "2.0", "id": "1", "method": method, "params": params}, headers)
+
+        async def run():
+            assert await adapter.connect() is True
+            try:
+                sent = await asyncio.to_thread(_post_json, base + "/", _send_body("secret task"), alice)
+                task_id, ctx = sent["result"]["id"], sent["result"]["contextId"]
+
+                got = await asyncio.to_thread(rpc, bob, "tasks/get", {"taskId": task_id})
+                assert got["error"]["code"] == protocol.ERR_TASK_NOT_FOUND and "alice-private-reply" not in json.dumps(got)
+                listed = await asyncio.to_thread(rpc, bob, "tasks/list", {})
+                assert listed["result"]["tasks"] == [] and listed["result"]["totalSize"] == 0
+                cancel = await asyncio.to_thread(rpc, bob, "tasks/cancel", {"taskId": task_id})
+                assert cancel["error"]["code"] == protocol.ERR_TASK_NOT_FOUND
+                push = await asyncio.to_thread(rpc, bob, "tasks/pushNotificationConfig/set",
+                                               {"taskId": task_id, "pushNotificationConfig": {"url": "https://bob.example/cb"}})
+                assert push["error"]["code"] == protocol.ERR_TASK_NOT_FOUND
+                assert adapter.tasks.get(task_id)["push_url"] == ""
+
+                own = await asyncio.to_thread(rpc, alice, "tasks/get", {"taskId": task_id})
+                assert protocol.extract_text(own["result"]["artifacts"][0]) == "alice-private-reply"
+                own_list = await asyncio.to_thread(rpc, alice, "tasks/list", {"contextId": ctx})
+                assert [t["id"] for t in own_list["result"]["tasks"]] == [task_id]
+            finally:
+                await adapter.disconnect()
+
+        asyncio.run(run())
+
     def test_mixed_parts_delivered_to_agent(self, monkeypatch):
         """A message with text + file + data Parts delivers all content to the
         agent — file URLs and data JSON are rendered into the text stream."""
