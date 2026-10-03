@@ -1,6 +1,6 @@
 name: doi-ref
 repo: https://github.com/EloquentBrush0x/hermes-context-refs
-sha: 73fa95d97f2a2baded1b8d09db5212e7bd2ebcc7
+sha: 49e286309ac2a904a2a60d8ae7445d19ebbd7c88
 subdir: doi-ref
 description: >-
   @doi:<doi> context references: attach a paper's, dataset's or software release's metadata to a
@@ -17,6 +17,7 @@ category: web
 requires_hermes: ">=0.21"
 docs_url: https://github.com/EloquentBrush0x/hermes-context-refs/tree/main/doi-ref
 version: "1.0.0"
+image: https://raw.githubusercontent.com/EloquentBrush0x/hermes-context-refs/49e286309ac2a904a2a60d8ae7445d19ebbd7c88/docs/doi-ref-card.png
 platforms: []
 capabilities:
   provides_tools: []
